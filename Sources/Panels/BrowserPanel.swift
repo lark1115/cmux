@@ -1865,6 +1865,10 @@ final class BrowserPanel: Panel, ObservableObject {
     @Published private(set) var profileID: UUID
     @Published private(set) var historyStore: BrowserHistoryStore
 
+    /// If non-nil, this panel is owned by an agent session and subject to
+    /// tab-level isolation rules. See `BrowserAgentSessionStore`.
+    private(set) var agentSessionId: UUID?
+
     /// The underlying web view
     private(set) var webView: WKWebView
     private var websiteDataStore: WKWebsiteDataStore
@@ -2566,10 +2570,13 @@ final class BrowserPanel: Panel, ObservableObject {
         bypassInsecureHTTPHostOnce: String? = nil,
         proxyEndpoint: BrowserProxyEndpoint? = nil,
         isRemoteWorkspace: Bool = false,
-        remoteWebsiteDataStoreIdentifier: UUID? = nil
+        remoteWebsiteDataStoreIdentifier: UUID? = nil,
+        agentSessionId: UUID? = nil,
+        agentDataStoreId: UUID? = nil
     ) {
         self.id = UUID()
         self.workspaceId = workspaceId
+        self.agentSessionId = agentSessionId
         let requestedProfileID = profileID ?? BrowserProfileStore.shared.effectiveLastUsedProfileID
         let resolvedProfileID = BrowserProfileStore.shared.profileDefinition(id: requestedProfileID) != nil
             ? requestedProfileID
@@ -2580,9 +2587,14 @@ final class BrowserPanel: Panel, ObservableObject {
         self.remoteProxyEndpoint = proxyEndpoint
         self.usesRemoteWorkspaceProxy = isRemoteWorkspace
         self.browserThemeMode = BrowserThemeSettings.mode()
-        self.websiteDataStore = isRemoteWorkspace
-            ? WKWebsiteDataStore(forIdentifier: remoteWebsiteDataStoreIdentifier ?? workspaceId)
-            : BrowserProfileStore.shared.websiteDataStore(for: resolvedProfileID)
+        if let agentDataStoreId {
+            // Agent session: use the agent-specific cloned data store.
+            self.websiteDataStore = WKWebsiteDataStore(forIdentifier: agentDataStoreId)
+        } else if isRemoteWorkspace {
+            self.websiteDataStore = WKWebsiteDataStore(forIdentifier: remoteWebsiteDataStoreIdentifier ?? workspaceId)
+        } else {
+            self.websiteDataStore = BrowserProfileStore.shared.websiteDataStore(for: resolvedProfileID)
+        }
 
         let webView = Self.makeWebView(
             profileID: resolvedProfileID,
@@ -2782,6 +2794,10 @@ final class BrowserPanel: Panel, ObservableObject {
 
     @discardableResult
     func switchToProfile(_ requestedProfileID: UUID) -> Bool {
+        // Agent-owned panels cannot switch profiles — agents must dispose and
+        // recreate to change profile.
+        guard agentSessionId == nil else { return false }
+
         let resolvedProfileID = BrowserProfileStore.shared.profileDefinition(id: requestedProfileID) != nil
             ? requestedProfileID
             : BrowserProfileStore.shared.builtInDefaultProfileID

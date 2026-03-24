@@ -234,6 +234,8 @@ struct SessionBrowserPanelSnapshot: Codable, Sendable {
     var developerToolsVisible: Bool
     var backHistoryURLStrings: [String]?
     var forwardHistoryURLStrings: [String]?
+    /// Agent-owned panels are discarded on restore (agents must reconnect).
+    var agentSessionId: UUID?
 }
 
 struct SessionMarkdownPanelSnapshot: Codable, Sendable {

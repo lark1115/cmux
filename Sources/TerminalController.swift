@@ -2341,6 +2341,16 @@ class TerminalController {
         case "browser.input_touch":
             return v2Result(id: id, self.v2BrowserInputTouch(params: params))
 
+        // Agent browser sessions
+        case "browser.agent_session.open":
+            return v2Result(id: id, self.v2BrowserAgentSessionOpen(params: params))
+        case "browser.agent_session.tab":
+            return v2Result(id: id, self.v2BrowserAgentSessionTab(params: params))
+        case "browser.agent_session.dispose":
+            return v2Result(id: id, self.v2BrowserAgentSessionDispose(params: params))
+        case "browser.agent_session.list":
+            return v2Result(id: id, self.v2BrowserAgentSessionList(params: params))
+
         // Markdown
         case "markdown.open":
             return v2Result(id: id, self.v2MarkdownOpen(params: params))
@@ -9795,6 +9805,216 @@ class TerminalController {
             ])
         }
         return result
+    }
+
+    // MARK: - Agent Browser Session Commands
+
+    /// Create a new browser tab with an agent session (clone-on-first-use cookie isolation).
+    /// Params: profile_id (UUID), url? (String), pane_id? (UUID)
+    /// Caller identity resolved from params["caller"]["surface_id"].
+    private func v2BrowserAgentSessionOpen(params: [String: Any]) -> V2CallResult {
+        guard let tabManager = v2ResolveTabManager(params: params) else {
+            return .err(code: "unavailable", message: "TabManager not available", data: nil)
+        }
+        guard let profileId = v2UUID(params, "profile_id") else {
+            return .err(code: "invalid_params", message: "Missing profile_id", data: nil)
+        }
+        // Resolve caller identity from the existing caller parameter infrastructure.
+        guard let callerObj = params["caller"] as? [String: Any],
+              let callerSurfaceUUID = v2UUIDAny(callerObj["surface_id"]) else {
+            return .err(code: "unauthorized", message: "Missing or invalid caller surface identity", data: nil)
+        }
+        guard BrowserProfileStore.shared.profileDefinition(id: profileId) != nil else {
+            return .err(code: "profile_not_found", message: "Profile not found", data: nil)
+        }
+        guard BrowserAgentSessionStore.shared.sessions.count < BrowserAgentSessionStore.maxConcurrentSessions else {
+            return .err(code: "session_limit_exceeded",
+                        message: "Maximum \(BrowserAgentSessionStore.maxConcurrentSessions) concurrent agent sessions",
+                        data: nil)
+        }
+
+        let url = v2String(params, "url").flatMap(URL.init(string:))
+        var result: V2CallResult = .err(code: "internal_error", message: "Failed to create agent browser session", data: nil)
+
+        // Cookie clone is async; we need to bridge to sync for the socket handler.
+        let semaphore = DispatchSemaphore(value: 0)
+        var session: BrowserAgentSession?
+
+        Task { @MainActor in
+            session = await BrowserAgentSessionStore.shared.getOrCreate(
+                agentSurfaceUUID: callerSurfaceUUID,
+                profileId: profileId
+            )
+            semaphore.signal()
+        }
+        semaphore.wait()
+
+        guard let session else {
+            return .err(code: "internal_error", message: "Failed to create agent session", data: nil)
+        }
+
+        v2MainSync {
+            guard let ws = v2ResolveWorkspace(params: params, tabManager: tabManager) else {
+                result = .err(code: "not_found", message: "Workspace not found", data: nil)
+                return
+            }
+            let paneUUID = v2UUID(params, "pane_id")
+                ?? ws.bonsplitController.focusedPaneId?.id
+            guard let paneUUID,
+                  let pane = ws.bonsplitController.allPaneIds.first(where: { $0.id == paneUUID }) else {
+                result = .err(code: "not_found", message: "Pane not found", data: nil)
+                return
+            }
+
+            guard let panel = ws.newBrowserSurface(
+                inPane: pane,
+                url: url,
+                focus: false,
+                preferredProfileID: profileId,
+                agentSessionId: session.id,
+                agentDataStoreId: session.dataStoreId
+            ) else {
+                result = .err(code: "internal_error", message: "Failed to create tab", data: nil)
+                return
+            }
+
+            result = .ok([
+                "surface_id": panel.id.uuidString,
+                "surface_ref": v2Ref(kind: .surface, uuid: panel.id),
+                "agent_session_id": session.id.uuidString,
+                "workspace_id": ws.id.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: ws.id),
+                "pane_id": pane.id.uuidString,
+                "pane_ref": v2Ref(kind: .pane, uuid: pane.id),
+            ])
+        }
+        return result
+    }
+
+    /// Open an additional tab in an existing agent session.
+    /// Params: session_id (UUID), url (String), pane_id? (UUID)
+    private func v2BrowserAgentSessionTab(params: [String: Any]) -> V2CallResult {
+        guard let tabManager = v2ResolveTabManager(params: params) else {
+            return .err(code: "unavailable", message: "TabManager not available", data: nil)
+        }
+        guard let sessionId = v2UUID(params, "session_id") else {
+            return .err(code: "invalid_params", message: "Missing session_id", data: nil)
+        }
+        guard let callerObj = params["caller"] as? [String: Any],
+              let callerSurfaceUUID = v2UUIDAny(callerObj["surface_id"]) else {
+            return .err(code: "unauthorized", message: "Missing caller identity", data: nil)
+        }
+
+        guard let session = BrowserAgentSessionStore.shared.sessions.first(where: { $0.id == sessionId }) else {
+            return .err(code: "session_not_found", message: "Agent session not found", data: nil)
+        }
+        guard session.agentSurfaceUUID == callerSurfaceUUID else {
+            return .err(code: "unauthorized", message: "Session owned by different agent", data: nil)
+        }
+
+        let url = v2String(params, "url").flatMap(URL.init(string:))
+        var result: V2CallResult = .err(code: "internal_error", message: "Failed to create tab", data: nil)
+
+        v2MainSync {
+            guard let ws = v2ResolveWorkspace(params: params, tabManager: tabManager) else {
+                result = .err(code: "not_found", message: "Workspace not found", data: nil)
+                return
+            }
+            let paneUUID = v2UUID(params, "pane_id")
+                ?? ws.bonsplitController.focusedPaneId?.id
+            guard let paneUUID,
+                  let pane = ws.bonsplitController.allPaneIds.first(where: { $0.id == paneUUID }) else {
+                result = .err(code: "not_found", message: "Pane not found", data: nil)
+                return
+            }
+
+            guard let panel = ws.newBrowserSurface(
+                inPane: pane,
+                url: url,
+                focus: false,
+                preferredProfileID: session.sourceProfileId,
+                agentSessionId: session.id,
+                agentDataStoreId: session.dataStoreId
+            ) else {
+                result = .err(code: "internal_error", message: "Failed to create tab", data: nil)
+                return
+            }
+
+            result = .ok([
+                "surface_id": panel.id.uuidString,
+                "surface_ref": v2Ref(kind: .surface, uuid: panel.id),
+                "workspace_id": ws.id.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: ws.id),
+                "pane_id": pane.id.uuidString,
+                "pane_ref": v2Ref(kind: .pane, uuid: pane.id),
+            ])
+        }
+        return result
+    }
+
+    /// Dispose an agent session: close all owned tabs and remove the data store from disk.
+    /// Params: session_id (UUID)
+    private func v2BrowserAgentSessionDispose(params: [String: Any]) -> V2CallResult {
+        guard let sessionId = v2UUID(params, "session_id") else {
+            return .err(code: "invalid_params", message: "Missing session_id", data: nil)
+        }
+        guard let callerObj = params["caller"] as? [String: Any],
+              let callerSurfaceUUID = v2UUIDAny(callerObj["surface_id"]) else {
+            return .err(code: "unauthorized", message: "Missing caller identity", data: nil)
+        }
+        guard let session = BrowserAgentSessionStore.shared.sessions.first(where: { $0.id == sessionId }) else {
+            return .err(code: "session_not_found", message: "Agent session not found", data: nil)
+        }
+        guard session.agentSurfaceUUID == callerSurfaceUUID else {
+            return .err(code: "unauthorized", message: "Session owned by different agent", data: nil)
+        }
+
+        // Close all browser panels owned by this session (skip undo stack).
+        v2MainSync {
+            guard let tabManager = v2ResolveTabManager(params: params) else { return }
+            for ws in tabManager.tabs {
+                let ownedPanelIds = ws.panels.values
+                    .compactMap { $0 as? BrowserPanel }
+                    .filter { $0.agentSessionId == sessionId }
+                    .map(\.id)
+                for panelId in ownedPanelIds {
+                    ws.closePanel(panelId, force: true)
+                }
+            }
+        }
+
+        // Dispose the session (removes data store from disk).
+        let semaphore = DispatchSemaphore(value: 0)
+        Task { @MainActor in
+            await BrowserAgentSessionStore.shared.dispose(sessionId: sessionId)
+            semaphore.signal()
+        }
+        semaphore.wait()
+
+        return .ok(["disposed": true, "session_id": sessionId.uuidString])
+    }
+
+    /// List agent sessions, optionally filtered by agent surface.
+    /// Params: agent_surface_id? (UUID)
+    private func v2BrowserAgentSessionList(params: [String: Any]) -> V2CallResult {
+        let agentFilter = v2UUID(params, "agent_surface_id")
+        let sessions: [BrowserAgentSession]
+        if let agentFilter {
+            sessions = BrowserAgentSessionStore.shared.sessionsForAgent(agentFilter)
+        } else {
+            sessions = BrowserAgentSessionStore.shared.sessions
+        }
+
+        let entries: [[String: Any]] = sessions.map { session in
+            [
+                "session_id": session.id.uuidString,
+                "agent_surface_id": session.agentSurfaceUUID.uuidString,
+                "source_profile_id": session.sourceProfileId.uuidString,
+                "profile_name": BrowserProfileStore.shared.displayName(for: session.sourceProfileId),
+                "created_at": ISO8601DateFormatter().string(from: session.createdAt),
+            ]
+        }
+        return .ok(["sessions": entries])
     }
 
     private func v2BrowserTabSwitch(params: [String: Any]) -> V2CallResult {
