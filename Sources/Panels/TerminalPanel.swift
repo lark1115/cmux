@@ -22,6 +22,8 @@ final class TerminalPanel: Panel, ObservableObject {
     /// Published directory from the terminal
     @Published private(set) var directory: String = ""
 
+    @Published private(set) var tmuxLayoutReport: TmuxPaneLayoutReport?
+
     /// Search state for find functionality
     @Published var searchState: TerminalSurface.SearchState? {
         didSet {
@@ -35,6 +37,8 @@ final class TerminalPanel: Panel, ObservableObject {
     /// Without this, certain pane-close sequences can leave terminal views detached
     /// (hostedView.window == nil) until the user switches workspaces.
     @Published var viewReattachToken: UInt64 = 0
+
+    var onRequestWorkspacePaneFlash: ((WorkspaceAttentionFlashReason) -> Void)?
 
     private var cancellables = Set<AnyCancellable>()
 
@@ -63,6 +67,10 @@ final class TerminalPanel: Panel, ObservableObject {
         surface.hostedView
     }
 
+    var requestedWorkingDirectory: String? {
+        surface.requestedWorkingDirectory
+    }
+
     init(workspaceId: UUID, surface: TerminalSurface) {
         self.id = surface.id
         self.workspaceId = workspaceId
@@ -84,14 +92,18 @@ final class TerminalPanel: Panel, ObservableObject {
         context: ghostty_surface_context_e = GHOSTTY_SURFACE_CONTEXT_SPLIT,
         configTemplate: ghostty_surface_config_s? = nil,
         workingDirectory: String? = nil,
-        additionalEnvironment: [String: String] = [:],
-        portOrdinal: Int = 0
+        portOrdinal: Int = 0,
+        initialCommand: String? = nil,
+        initialEnvironmentOverrides: [String: String] = [:],
+        additionalEnvironment: [String: String] = [:]
     ) {
         let surface = TerminalSurface(
             tabId: workspaceId,
             context: context,
             configTemplate: configTemplate,
             workingDirectory: workingDirectory,
+            initialCommand: initialCommand,
+            initialEnvironmentOverrides: initialEnvironmentOverrides,
             additionalEnvironment: additionalEnvironment
         )
         surface.portOrdinal = portOrdinal
@@ -115,6 +127,11 @@ final class TerminalPanel: Panel, ObservableObject {
     func updateWorkspaceId(_ newWorkspaceId: UUID) {
         workspaceId = newWorkspaceId
         surface.updateWorkspaceId(newWorkspaceId)
+    }
+
+    func updateTmuxLayoutReport(_ report: TmuxPaneLayoutReport?) {
+        guard tmuxLayoutReport != report else { return }
+        tmuxLayoutReport = report
     }
 
     func focus() {
@@ -186,11 +203,70 @@ final class TerminalPanel: Panel, ObservableObject {
         surface.needsConfirmClose()
     }
 
-    func triggerFlash() {
-        hostedView.triggerFlash()
+    func shouldPersistScrollbackForSessionSnapshot() -> Bool {
+        // Session restore only replays terminal output into a fresh shell. If Ghostty
+        // says we are not safely at a prompt, replaying that state later is misleading.
+        !surface.needsConfirmClose()
+    }
+
+    func triggerFlash(reason: WorkspaceAttentionFlashReason) {
+        guard NotificationPaneFlashSettings.isEnabled() else { return }
+
+        switch TmuxOverlayExperimentSettings.target() {
+        case .bonsplitPane:
+            if let onRequestWorkspacePaneFlash {
+                onRequestWorkspacePaneFlash(reason)
+                return
+            }
+            hostedView.triggerFlash(style: GhosttySurfaceScrollView.flashStyle(for: reason))
+        case .surface, .tmuxActivePane:
+            hostedView.triggerFlash(style: GhosttySurfaceScrollView.flashStyle(for: reason))
+        }
+    }
+
+    func triggerNotificationDismissFlash() {
+        triggerFlash(reason: .notificationDismiss)
     }
 
     func applyWindowBackgroundIfActive() {
         surface.applyWindowBackgroundIfActive()
+    }
+
+    func captureFocusIntent(in window: NSWindow?) -> PanelFocusIntent {
+        .terminal(hostedView.capturePanelFocusIntent(in: window))
+    }
+
+    func preferredFocusIntentForActivation() -> PanelFocusIntent {
+        .terminal(hostedView.preferredPanelFocusIntentForActivation())
+    }
+
+    func prepareFocusIntentForActivation(_ intent: PanelFocusIntent) {
+        guard case .terminal(let target) = intent else { return }
+        hostedView.preparePanelFocusIntentForActivation(target)
+    }
+
+    @discardableResult
+    func restoreFocusIntent(_ intent: PanelFocusIntent) -> Bool {
+        switch intent {
+        case .panel:
+            focus()
+            return true
+        case .terminal(let target):
+            return hostedView.restorePanelFocusIntent(target)
+        default:
+            return false
+        }
+    }
+
+    func ownedFocusIntent(for responder: NSResponder, in window: NSWindow) -> PanelFocusIntent? {
+        _ = window
+        guard let intent = hostedView.ownedPanelFocusIntent(for: responder) else { return nil }
+        return .terminal(intent)
+    }
+
+    @discardableResult
+    func yieldFocusIntent(_ intent: PanelFocusIntent, in window: NSWindow) -> Bool {
+        guard case .terminal(let target) = intent else { return false }
+        return hostedView.yieldPanelFocusIntent(target, in: window)
     }
 }

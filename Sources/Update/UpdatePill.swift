@@ -1,4 +1,5 @@
 import AppKit
+import Bonsplit
 import Foundation
 import SwiftUI
 
@@ -10,8 +11,7 @@ struct UpdatePill: View {
     private let textFont = NSFont.systemFont(ofSize: 11, weight: .medium)
 
     var body: some View {
-        let state = model.effectiveState
-        if !state.isIdle {
+        if model.showsPill {
             pillButton
                 .popover(
                     isPresented: $showPopover,
@@ -27,6 +27,11 @@ struct UpdatePill: View {
     @ViewBuilder
     private var pillButton: some View {
         Button(action: {
+            if model.showsDetectedBackgroundUpdate {
+                showPopover = false
+                AppDelegate.shared?.checkForUpdates(nil)
+                return
+            }
             if case .notFound(let notFound) = model.state {
                 model.state = .idle
                 notFound.acknowledgement()
@@ -54,7 +59,7 @@ struct UpdatePill: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .help(model.text)
+        .safeHelp(model.text)
         .accessibilityLabel(model.text)
         .accessibilityIdentifier("UpdatePill")
     }

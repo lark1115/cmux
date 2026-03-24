@@ -88,7 +88,7 @@ struct SurfaceSearchOverlay: View {
                     Image(systemName: "chevron.up")
                 }
                 .buttonStyle(SearchButtonStyle())
-                .help(String(localized: "search.nextMatch.help", defaultValue: "Next match (Return)"))
+                .safeHelp(String(localized: "search.nextMatch.help", defaultValue: "Next match (Return)"))
 
                 Button(action: {
                     #if DEBUG
@@ -99,7 +99,7 @@ struct SurfaceSearchOverlay: View {
                     Image(systemName: "chevron.down")
                 }
                 .buttonStyle(SearchButtonStyle())
-                .help(String(localized: "search.previousMatch.help", defaultValue: "Previous match (Shift+Return)"))
+                .safeHelp(String(localized: "search.previousMatch.help", defaultValue: "Previous match (Shift+Return)"))
 
                 Button(action: {
                     #if DEBUG
@@ -110,7 +110,7 @@ struct SurfaceSearchOverlay: View {
                     Image(systemName: "xmark")
                 }
                 .buttonStyle(SearchButtonStyle())
-                .help(String(localized: "search.close.help", defaultValue: "Close (Esc)"))
+                .safeHelp(String(localized: "search.close.help", defaultValue: "Close (Esc)"))
             }
             .padding(8)
             .background(.background)
@@ -328,10 +328,19 @@ private struct SearchTextFieldRepresentable: NSViewRepresentable {
                 field.currentEditor() != nil ||
                 ((fr as? NSTextView)?.delegate as? NSTextField) === field
             #if DEBUG
-            dlog("find.nativeField.searchFocusNotification surface=\(coordinator.parent.surfaceId.uuidString.prefix(5)) alreadyFocused=\(alreadyFocused)")
+            dlog(
+                "find.nativeField.searchFocusNotification surface=\(coordinator.parent.surfaceId.uuidString.prefix(5)) " +
+                "alreadyFocused=\(alreadyFocused) firstResponder=\(String(describing: fr))"
+            )
             #endif
             guard !alreadyFocused else { return }
-            window.makeFirstResponder(field)
+            let result = window.makeFirstResponder(field)
+#if DEBUG
+            dlog(
+                "find.nativeField.searchFocusApply surface=\(coordinator.parent.surfaceId.uuidString.prefix(5)) " +
+                "result=\(result ? 1 : 0) firstResponder=\(String(describing: window.firstResponder))"
+            )
+#endif
         }
 
         return field
