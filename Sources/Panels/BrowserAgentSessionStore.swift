@@ -169,10 +169,8 @@ final class BrowserAgentSessionStore: ObservableObject {
     /// Derived by counting live `BrowserPanel` instances whose
     /// `agentSessionId` matches. This avoids storing a stale count.
     ///
-    /// - Note: The actual panel enumeration depends on the workspace /
-    ///   tab-manager layer providing a way to iterate panels.  For now
-    ///   this returns 0 as a placeholder — wired up in Phase 1 socket
-    ///   integration when `BrowserPanel.agentSessionId` is added.
+    /// Enumerates all windows → tab managers → workspaces → panels
+    /// to count `BrowserPanel` instances matching the given session.
     func tabCount(for sessionId: UUID) -> Int {
         guard let app = AppDelegate.shared else { return 0 }
         var count = 0

@@ -1627,20 +1627,23 @@ class TerminalController {
                     continue
                 }
 
-                // Extract agent surface UUID from agent session commands for disconnect cleanup.
-                if trimmed.hasPrefix("{"), trimmed.contains("browser.agent_session.open") {
-                    if let data = trimmed.data(using: .utf8),
-                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                       let params = json["params"] as? [String: Any],
-                       let caller = params["caller"] as? [String: Any],
-                       let surfaceIdStr = caller["surface_id"] as? String,
-                       let surfaceUUID = UUID(uuidString: surfaceIdStr) {
-                        agentSurfaceUUIDs.insert(surfaceUUID)
-                    }
-                }
-
                 let response = processCommand(trimmed)
                 writeSocketResponse(response, to: socket)
+
+                // Track agent surface UUIDs from successful agent session opens for
+                // disconnect cleanup. Only register after processCommand succeeds
+                // (response contains "result", not "error") and method is verified.
+                if trimmed.hasPrefix("{"),
+                   response.contains("\"agent_session_id\""),
+                   let data = trimmed.data(using: .utf8),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   (json["method"] as? String) == "browser.agent_session.open",
+                   let params = json["params"] as? [String: Any],
+                   let caller = params["caller"] as? [String: Any],
+                   let surfaceIdStr = caller["surface_id"] as? String,
+                   let surfaceUUID = UUID(uuidString: surfaceIdStr) {
+                    agentSurfaceUUIDs.insert(surfaceUUID)
+                }
             }
         }
 
@@ -10084,13 +10087,18 @@ class TerminalController {
 
         var result: V2CallResult = .err(code: "internal_error", message: "Unexpected error", data: nil)
         v2MainSync {
-            // When no explicit filter, use the caller's own surface UUID to scope results.
-            let effectiveFilter = agentFilter ?? callerSurfaceUUID
+            // Always scope to caller's own sessions. Explicit agent_surface_id filter
+            // is only allowed if it matches the caller (prevents cross-agent enumeration).
+            let effectiveFilter: UUID?
+            if let agentFilter, let callerSurfaceUUID, agentFilter == callerSurfaceUUID {
+                effectiveFilter = agentFilter
+            } else {
+                effectiveFilter = callerSurfaceUUID
+            }
             let sessions: [BrowserAgentSession]
             if let effectiveFilter {
                 sessions = BrowserAgentSessionStore.shared.sessionsForAgent(effectiveFilter)
             } else {
-                // No caller and no filter — return empty to avoid leaking all sessions.
                 sessions = []
             }
 
