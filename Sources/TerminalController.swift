@@ -1605,6 +1605,9 @@ class TerminalController {
         var buffer = [UInt8](repeating: 0, count: 4096)
         var pending = ""
         var authenticated = false
+        // Track agent surface UUIDs that opened sessions on this connection
+        // so we can clean up on disconnect.
+        var agentSurfaceUUIDs = Set<UUID>()
 
         while withListenerState({ isRunning }) {
             let bytesRead = read(socket, &buffer, buffer.count - 1)
@@ -1624,8 +1627,31 @@ class TerminalController {
                     continue
                 }
 
+                // Extract agent surface UUID from agent session commands for disconnect cleanup.
+                if trimmed.hasPrefix("{"), trimmed.contains("browser.agent_session.open") {
+                    if let data = trimmed.data(using: .utf8),
+                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let params = json["params"] as? [String: Any],
+                       let caller = params["caller"] as? [String: Any],
+                       let surfaceIdStr = caller["surface_id"] as? String,
+                       let surfaceUUID = UUID(uuidString: surfaceIdStr) {
+                        agentSurfaceUUIDs.insert(surfaceUUID)
+                    }
+                }
+
                 let response = processCommand(trimmed)
                 writeSocketResponse(response, to: socket)
+            }
+        }
+
+        // On connection close, clean up any agent sessions owned by surfaces
+        // that were active on this connection.
+        if !agentSurfaceUUIDs.isEmpty {
+            let uuids = agentSurfaceUUIDs
+            Task { @MainActor in
+                for uuid in uuids {
+                    await BrowserAgentSessionStore.shared.handleAgentDisconnect(agentSurfaceUUID: uuid)
+                }
             }
         }
     }
@@ -3121,6 +3147,22 @@ class TerminalController {
             }
         }
         return nil
+    }
+
+    /// Verify that a caller-provided surface UUID exists as a live panel in some workspace.
+    /// Must be called on main thread (inside v2MainSync).
+    private func v2VerifyCallerSurface(_ surfaceUUID: UUID) -> Bool {
+        guard let app = AppDelegate.shared else { return false }
+        let windows = app.listMainWindowSummaries()
+        for item in windows {
+            guard let tm = app.tabManagerFor(windowId: item.windowId) else { continue }
+            for ws in tm.tabs {
+                if ws.panels[surfaceUUID] != nil {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     private func v2LocatePane(_ paneUUID: UUID) -> (windowId: UUID, tabManager: TabManager, workspace: Workspace, paneId: PaneID)? {
@@ -9824,19 +9866,29 @@ class TerminalController {
               let callerSurfaceUUID = v2UUIDAny(callerObj["surface_id"]) else {
             return .err(code: "unauthorized", message: "Missing or invalid caller surface identity", data: nil)
         }
-        guard BrowserProfileStore.shared.profileDefinition(id: profileId) != nil else {
-            return .err(code: "profile_not_found", message: "Profile not found", data: nil)
+
+        // Verify the caller surface_id exists in a live workspace.
+        var callerVerified = false
+        v2MainSync {
+            callerVerified = v2VerifyCallerSurface(callerSurfaceUUID)
         }
-        guard BrowserAgentSessionStore.shared.sessions.count < BrowserAgentSessionStore.maxConcurrentSessions else {
-            return .err(code: "session_limit_exceeded",
-                        message: "Maximum \(BrowserAgentSessionStore.maxConcurrentSessions) concurrent agent sessions",
-                        data: nil)
+        guard callerVerified else {
+            return .err(code: "unauthorized", message: "Caller surface not found in any workspace", data: nil)
+        }
+
+        var profileExists = false
+        v2MainSync {
+            profileExists = BrowserProfileStore.shared.profileDefinition(id: profileId) != nil
+        }
+        guard profileExists else {
+            return .err(code: "profile_not_found", message: "Profile not found", data: nil)
         }
 
         let url = v2String(params, "url").flatMap(URL.init(string:))
         var result: V2CallResult = .err(code: "internal_error", message: "Failed to create agent browser session", data: nil)
 
-        // Cookie clone is async; we need to bridge to sync for the socket handler.
+        // Cookie clone is async; bridge to sync for the socket handler.
+        // handleClient runs on a background queue so semaphore.wait() does NOT block main.
         let semaphore = DispatchSemaphore(value: 0)
         var session: BrowserAgentSession?
 
@@ -9850,7 +9902,9 @@ class TerminalController {
         semaphore.wait()
 
         guard let session else {
-            return .err(code: "internal_error", message: "Failed to create agent session", data: nil)
+            return .err(code: "session_limit_exceeded",
+                        message: "Maximum \(BrowserAgentSessionStore.maxConcurrentSessions) concurrent agent sessions",
+                        data: nil)
         }
 
         v2MainSync {
@@ -9905,7 +9959,17 @@ class TerminalController {
             return .err(code: "unauthorized", message: "Missing caller identity", data: nil)
         }
 
-        guard let session = BrowserAgentSessionStore.shared.sessions.first(where: { $0.id == sessionId }) else {
+        // Verify the caller surface_id exists in a live workspace.
+        var callerVerified = false
+        var session: BrowserAgentSession?
+        v2MainSync {
+            callerVerified = v2VerifyCallerSurface(callerSurfaceUUID)
+            session = BrowserAgentSessionStore.shared.sessions.first(where: { $0.id == sessionId })
+        }
+        guard callerVerified else {
+            return .err(code: "unauthorized", message: "Caller surface not found in any workspace", data: nil)
+        }
+        guard let session else {
             return .err(code: "session_not_found", message: "Agent session not found", data: nil)
         }
         guard session.agentSurfaceUUID == callerSurfaceUUID else {
@@ -9962,7 +10026,18 @@ class TerminalController {
               let callerSurfaceUUID = v2UUIDAny(callerObj["surface_id"]) else {
             return .err(code: "unauthorized", message: "Missing caller identity", data: nil)
         }
-        guard let session = BrowserAgentSessionStore.shared.sessions.first(where: { $0.id == sessionId }) else {
+
+        // Verify the caller surface_id exists in a live workspace and validate session ownership.
+        var callerVerified = false
+        var session: BrowserAgentSession?
+        v2MainSync {
+            callerVerified = v2VerifyCallerSurface(callerSurfaceUUID)
+            session = BrowserAgentSessionStore.shared.sessions.first(where: { $0.id == sessionId })
+        }
+        guard callerVerified else {
+            return .err(code: "unauthorized", message: "Caller surface not found in any workspace", data: nil)
+        }
+        guard let session else {
             return .err(code: "session_not_found", message: "Agent session not found", data: nil)
         }
         guard session.agentSurfaceUUID == callerSurfaceUUID else {
@@ -9984,6 +10059,7 @@ class TerminalController {
         }
 
         // Dispose the session (removes data store from disk).
+        // handleClient runs on a background queue so semaphore.wait() does NOT block main.
         let semaphore = DispatchSemaphore(value: 0)
         Task { @MainActor in
             await BrowserAgentSessionStore.shared.dispose(sessionId: sessionId)
@@ -9997,24 +10073,41 @@ class TerminalController {
     /// List agent sessions, optionally filtered by agent surface.
     /// Params: agent_surface_id? (UUID)
     private func v2BrowserAgentSessionList(params: [String: Any]) -> V2CallResult {
-        let agentFilter = v2UUID(params, "agent_surface_id")
-        let sessions: [BrowserAgentSession]
-        if let agentFilter {
-            sessions = BrowserAgentSessionStore.shared.sessionsForAgent(agentFilter)
-        } else {
-            sessions = BrowserAgentSessionStore.shared.sessions
-        }
+        // Resolve caller identity — when no explicit agent_surface_id filter is provided,
+        // only return sessions owned by the verified caller to prevent information leakage.
+        let callerSurfaceUUID: UUID? = {
+            guard let callerObj = params["caller"] as? [String: Any] else { return nil }
+            return v2UUIDAny(callerObj["surface_id"])
+        }()
 
-        let entries: [[String: Any]] = sessions.map { session in
-            [
-                "session_id": session.id.uuidString,
-                "agent_surface_id": session.agentSurfaceUUID.uuidString,
-                "source_profile_id": session.sourceProfileId.uuidString,
-                "profile_name": BrowserProfileStore.shared.displayName(for: session.sourceProfileId),
-                "created_at": ISO8601DateFormatter().string(from: session.createdAt),
-            ]
+        let agentFilter = v2UUID(params, "agent_surface_id")
+
+        var result: V2CallResult = .err(code: "internal_error", message: "Unexpected error", data: nil)
+        v2MainSync {
+            // When no explicit filter, use the caller's own surface UUID to scope results.
+            let effectiveFilter = agentFilter ?? callerSurfaceUUID
+            let sessions: [BrowserAgentSession]
+            if let effectiveFilter {
+                sessions = BrowserAgentSessionStore.shared.sessionsForAgent(effectiveFilter)
+            } else {
+                // No caller and no filter — return empty to avoid leaking all sessions.
+                sessions = []
+            }
+
+            let store = BrowserAgentSessionStore.shared
+            let entries: [[String: Any]] = sessions.map { session in
+                [
+                    "session_id": session.id.uuidString,
+                    "agent_surface_id": session.agentSurfaceUUID.uuidString,
+                    "source_profile_id": session.sourceProfileId.uuidString,
+                    "profile_name": BrowserProfileStore.shared.displayName(for: session.sourceProfileId),
+                    "tab_count": store.tabCount(for: session.id),
+                    "created_at": ISO8601DateFormatter().string(from: session.createdAt),
+                ]
+            }
+            result = .ok(["sessions": entries])
         }
-        return .ok(["sessions": entries])
+        return result
     }
 
     private func v2BrowserTabSwitch(params: [String: Any]) -> V2CallResult {

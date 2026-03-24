@@ -419,7 +419,8 @@ extension Workspace {
                 pageZoom: Double(browserPanel.currentPageZoomFactor()),
                 developerToolsVisible: browserPanel.isDeveloperToolsVisible(),
                 backHistoryURLStrings: historySnapshot.backHistoryURLStrings,
-                forwardHistoryURLStrings: historySnapshot.forwardHistoryURLStrings
+                forwardHistoryURLStrings: historySnapshot.forwardHistoryURLStrings,
+                agentSessionId: browserPanel.agentSessionId
             )
             markdownSnapshot = nil
         case .markdown:
@@ -596,6 +597,11 @@ extension Workspace {
             applySessionPanelMetadata(snapshot, toPanelId: terminalPanel.id)
             return terminalPanel.id
         case .browser:
+            // Agent-owned browser panels are not restored — agents must reconnect
+            // and create new sessions with fresh cookie clones.
+            if snapshot.browser?.agentSessionId != nil {
+                return nil
+            }
             let initialURL = snapshot.browser?.urlString.flatMap { URL(string: $0) }
             guard let browserPanel = newBrowserSurface(
                 inPane: paneId,

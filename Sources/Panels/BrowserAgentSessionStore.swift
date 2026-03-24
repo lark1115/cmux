@@ -1,4 +1,5 @@
 #if canImport(WebKit)
+import AppKit
 import Foundation
 import WebKit
 
@@ -76,7 +77,7 @@ final class BrowserAgentSessionStore: ObservableObject {
     ///
     /// Thread-safe against concurrent calls for the same pair: uses
     /// `cloneInFlight` to deduplicate in-flight clones.
-    func getOrCreate(agentSurfaceUUID: UUID, profileId: UUID) async -> BrowserAgentSession {
+    func getOrCreate(agentSurfaceUUID: UUID, profileId: UUID) async -> BrowserAgentSession? {
         // Fast path: return existing session.
         if let existing = sessions.first(where: {
             $0.agentSurfaceUUID == agentSurfaceUUID && $0.sourceProfileId == profileId
@@ -91,18 +92,9 @@ final class BrowserAgentSessionStore: ObservableObject {
             if let inFlight = cloneInFlight[key] {
                 return await inFlight.value
             }
-            // Return a placeholder error session — callers should check
-            // session count before calling. In practice the socket handler
-            // will return a `session_limit_exceeded` error before reaching
-            // here.  Create a degenerate session so the compiler is happy.
-            let degenerate = BrowserAgentSession(
-                id: UUID(),
-                agentSurfaceUUID: agentSurfaceUUID,
-                sourceProfileId: profileId,
-                dataStoreId: UUID(),
-                createdAt: Date()
-            )
-            return degenerate
+            // At capacity with no in-flight clone — return nil so callers
+            // can report a proper error instead of leaking an untracked store.
+            return nil
         }
 
         let key = "\(agentSurfaceUUID)-\(profileId)"
@@ -182,9 +174,21 @@ final class BrowserAgentSessionStore: ObservableObject {
     ///   this returns 0 as a placeholder — wired up in Phase 1 socket
     ///   integration when `BrowserPanel.agentSessionId` is added.
     func tabCount(for sessionId: UUID) -> Int {
-        // TODO: Wire to workspace panel enumeration once BrowserPanel
-        // gains agentSessionId property.
-        return 0
+        guard let app = AppDelegate.shared else { return 0 }
+        var count = 0
+        let windows = app.listMainWindowSummaries()
+        for item in windows {
+            guard let tm = app.tabManagerFor(windowId: item.windowId) else { continue }
+            for ws in tm.tabs {
+                for panel in ws.panels.values {
+                    if let browser = panel as? BrowserPanel,
+                       browser.agentSessionId == sessionId {
+                        count += 1
+                    }
+                }
+            }
+        }
+        return count
     }
 
     // MARK: - Agent Disconnect
