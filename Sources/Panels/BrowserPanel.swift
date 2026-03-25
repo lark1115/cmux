@@ -2774,9 +2774,15 @@ final class BrowserPanel: Panel, ObservableObject {
     ) {
         workspaceId = newWorkspaceId
         usesRemoteWorkspaceProxy = isRemoteWorkspace
-        let targetStore = isRemoteWorkspace
-            ? WKWebsiteDataStore(forIdentifier: remoteWebsiteDataStoreIdentifier ?? newWorkspaceId)
-            : BrowserProfileStore.shared.websiteDataStore(for: profileID)
+        let targetStore: WKWebsiteDataStore
+        if agentSessionId != nil {
+            // Agent-owned panel: preserve the agent-specific cloned data store.
+            targetStore = websiteDataStore
+        } else if isRemoteWorkspace {
+            targetStore = WKWebsiteDataStore(forIdentifier: remoteWebsiteDataStoreIdentifier ?? newWorkspaceId)
+        } else {
+            targetStore = BrowserProfileStore.shared.websiteDataStore(for: profileID)
+        }
         let needsStoreSwap = webView.configuration.websiteDataStore !== targetStore
         websiteDataStore = targetStore
         remoteProxyEndpoint = proxyEndpoint

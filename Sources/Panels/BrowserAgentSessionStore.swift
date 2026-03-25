@@ -70,6 +70,12 @@ final class BrowserAgentSessionStore: ObservableObject {
         )
     }
 
+    /// Internal initializer for testing — accepts a custom manifest URL
+    /// so tests don't write to the production manifest path.
+    init(manifestURL: URL) {
+        self.manifestURL = manifestURL
+    }
+
     // MARK: - Get or Create
 
     /// Return an existing session for the agent + profile pair, or create a
@@ -195,6 +201,26 @@ final class BrowserAgentSessionStore: ObservableObject {
     /// Disposes all sessions owned by the disconnected agent surface.
     func handleAgentDisconnect(agentSurfaceUUID: UUID) async {
         let orphaned = sessionsForAgent(agentSurfaceUUID)
+
+        // Close all BrowserPanels owned by these sessions across all windows
+        // before disposing the sessions, so panels don't outlive their data stores.
+        if let app = AppDelegate.shared {
+            let sessionIds = Set(orphaned.map(\.id))
+            let windows = app.listMainWindowSummaries()
+            for item in windows {
+                guard let tm = app.tabManagerFor(windowId: item.windowId) else { continue }
+                for ws in tm.tabs {
+                    let ownedPanelIds = ws.panels.values
+                        .compactMap { $0 as? BrowserPanel }
+                        .filter { $0.agentSessionId != nil && sessionIds.contains($0.agentSessionId!) }
+                        .map(\.id)
+                    for panelId in ownedPanelIds {
+                        ws.closePanel(panelId, force: true)
+                    }
+                }
+            }
+        }
+
         for session in orphaned {
             await dispose(sessionId: session.id)
         }

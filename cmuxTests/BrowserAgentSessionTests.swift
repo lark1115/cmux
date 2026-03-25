@@ -64,9 +64,19 @@ final class WKProcessPoolCookieIsolationTests: XCTestCase {
 
 final class BrowserAgentSessionStoreTests: XCTestCase {
 
+    /// Create a store with a temp manifest path to avoid writing to production.
+    @MainActor
+    private func makeTempStore() -> BrowserAgentSessionStore {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cmux-test-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let manifestURL = tempDir.appendingPathComponent("agent_sessions_manifest.json")
+        return BrowserAgentSessionStore(manifestURL: manifestURL)
+    }
+
     @MainActor
     func testGetOrCreateReturnsNewSession() async {
-        let store = BrowserAgentSessionStore()
+        let store = makeTempStore()
         let agentUUID = UUID()
         let profileId = BrowserProfileStore.shared.builtInDefaultProfileID
 
@@ -82,7 +92,7 @@ final class BrowserAgentSessionStoreTests: XCTestCase {
 
     @MainActor
     func testGetOrCreateReturnsSameSessionOnSecondCall() async {
-        let store = BrowserAgentSessionStore()
+        let store = makeTempStore()
         let agentUUID = UUID()
         let profileId = BrowserProfileStore.shared.builtInDefaultProfileID
 
@@ -96,7 +106,7 @@ final class BrowserAgentSessionStoreTests: XCTestCase {
 
     @MainActor
     func testDifferentAgentsSamProfileGetDifferentSessions() async {
-        let store = BrowserAgentSessionStore()
+        let store = makeTempStore()
         let agentA = UUID()
         let agentB = UUID()
         let profileId = BrowserProfileStore.shared.builtInDefaultProfileID
@@ -113,7 +123,7 @@ final class BrowserAgentSessionStoreTests: XCTestCase {
 
     @MainActor
     func testDisposeRemovesSession() async {
-        let store = BrowserAgentSessionStore()
+        let store = makeTempStore()
         let session = await store.getOrCreate(
             agentSurfaceUUID: UUID(),
             profileId: BrowserProfileStore.shared.builtInDefaultProfileID
@@ -128,7 +138,7 @@ final class BrowserAgentSessionStoreTests: XCTestCase {
 
     @MainActor
     func testMaxConcurrentSessionsReturnsNil() async {
-        let store = BrowserAgentSessionStore()
+        let store = makeTempStore()
         let profileId = BrowserProfileStore.shared.builtInDefaultProfileID
 
         // Fill to capacity.
@@ -150,7 +160,7 @@ final class BrowserAgentSessionStoreTests: XCTestCase {
 
     @MainActor
     func testHandleAgentDisconnectDisposesAllAgentSessions() async {
-        let store = BrowserAgentSessionStore()
+        let store = makeTempStore()
         let agentUUID = UUID()
         let profileA = BrowserProfileStore.shared.builtInDefaultProfileID
 

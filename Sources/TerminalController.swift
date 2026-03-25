@@ -1605,8 +1605,10 @@ class TerminalController {
         var buffer = [UInt8](repeating: 0, count: 4096)
         var pending = ""
         var authenticated = false
-        // Track agent surface UUIDs that opened sessions on this connection
-        // so we can clean up on disconnect.
+        // Only track agent surfaces for disconnect cleanup on long-lived
+        // agent connections (identified via system.identify). One-shot CLI
+        // commands (connect → send → close) must NOT trigger cleanup.
+        var isIdentifiedAgent = false
         var agentSurfaceUUIDs = Set<UUID>()
 
         while withListenerState({ isRunning }) {
@@ -1630,10 +1632,20 @@ class TerminalController {
                 let response = processCommand(trimmed)
                 writeSocketResponse(response, to: socket)
 
+                // Mark connection as a long-lived agent when system.identify is sent.
+                if !isIdentifiedAgent,
+                   trimmed.hasPrefix("{"),
+                   let data = trimmed.data(using: .utf8),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   (json["method"] as? String) == "system.identify" {
+                    isIdentifiedAgent = true
+                }
+
                 // Track agent surface UUIDs from successful agent session opens for
-                // disconnect cleanup. Only register after processCommand succeeds
-                // (response contains "result", not "error") and method is verified.
-                if trimmed.hasPrefix("{"),
+                // disconnect cleanup. Only register on identified (long-lived) agent
+                // connections — one-shot CLI commands must not trigger cleanup.
+                if isIdentifiedAgent,
+                   trimmed.hasPrefix("{"),
                    response.contains("\"agent_session_id\""),
                    let data = trimmed.data(using: .utf8),
                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -10047,16 +10059,21 @@ class TerminalController {
             return .err(code: "unauthorized", message: "Session owned by different agent", data: nil)
         }
 
-        // Close all browser panels owned by this session (skip undo stack).
+        // Close all browser panels owned by this session across ALL windows
+        // (skip undo stack). A session may have panels in multiple windows.
         v2MainSync {
-            guard let tabManager = v2ResolveTabManager(params: params) else { return }
-            for ws in tabManager.tabs {
-                let ownedPanelIds = ws.panels.values
-                    .compactMap { $0 as? BrowserPanel }
-                    .filter { $0.agentSessionId == sessionId }
-                    .map(\.id)
-                for panelId in ownedPanelIds {
-                    ws.closePanel(panelId, force: true)
+            guard let app = AppDelegate.shared else { return }
+            let windows = app.listMainWindowSummaries()
+            for item in windows {
+                guard let tm = app.tabManagerFor(windowId: item.windowId) else { continue }
+                for ws in tm.tabs {
+                    let ownedPanelIds = ws.panels.values
+                        .compactMap { $0 as? BrowserPanel }
+                        .filter { $0.agentSessionId == sessionId }
+                        .map(\.id)
+                    for panelId in ownedPanelIds {
+                        ws.closePanel(panelId, force: true)
+                    }
                 }
             }
         }
