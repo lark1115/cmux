@@ -91,8 +91,8 @@ final class BrowserAgentSessionStore: ObservableObject {
             return existing
         }
 
-        // Enforce session limit.
-        guard sessions.count < Self.maxConcurrentSessions else {
+        // Enforce session limit (include in-flight clones toward the cap).
+        guard sessions.count + cloneInFlight.count < Self.maxConcurrentSessions else {
             // If at capacity, still check for a matching in-flight clone.
             let key = "\(agentSurfaceUUID)-\(profileId)"
             if let inFlight = cloneInFlight[key] {
@@ -126,6 +126,12 @@ final class BrowserAgentSessionStore: ObservableObject {
             let agentStore = WKWebsiteDataStore(forIdentifier: session.dataStoreId)
             await sourceStore.cloneCookies(to: agentStore)
 
+            // If the session was disposed while cloning, skip appending.
+            guard !Task.isCancelled else {
+                self.cloneInFlight.removeValue(forKey: key)
+                return session
+            }
+
             self.sessions.append(session)
             self.cloneInFlight.removeValue(forKey: key)
             self.persistManifest()
@@ -147,6 +153,13 @@ final class BrowserAgentSessionStore: ObservableObject {
     func dispose(sessionId: UUID) async {
         guard let index = sessions.firstIndex(where: { $0.id == sessionId }) else { return }
         let session = sessions.remove(at: index)
+
+        // Cancel any in-flight clone tasks for this agent.
+        let agentUUID = session.agentSurfaceUUID
+        for (key, task) in cloneInFlight where key.hasPrefix(agentUUID.uuidString) {
+            task.cancel()
+            cloneInFlight.removeValue(forKey: key)
+        }
 
         // Remove the cloned data store from disk.
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in

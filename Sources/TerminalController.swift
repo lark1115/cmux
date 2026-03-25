@@ -9925,6 +9925,9 @@ class TerminalController {
         v2MainSync {
             guard let ws = v2ResolveWorkspace(params: params, tabManager: tabManager) else {
                 result = .err(code: "not_found", message: "Workspace not found", data: nil)
+                Task { @MainActor in
+                    await BrowserAgentSessionStore.shared.dispose(sessionId: session.id)
+                }
                 return
             }
             let paneUUID = v2UUID(params, "pane_id")
@@ -9932,6 +9935,9 @@ class TerminalController {
             guard let paneUUID,
                   let pane = ws.bonsplitController.allPaneIds.first(where: { $0.id == paneUUID }) else {
                 result = .err(code: "not_found", message: "Pane not found", data: nil)
+                Task { @MainActor in
+                    await BrowserAgentSessionStore.shared.dispose(sessionId: session.id)
+                }
                 return
             }
 
@@ -9944,6 +9950,9 @@ class TerminalController {
                 agentDataStoreId: session.dataStoreId
             ) else {
                 result = .err(code: "internal_error", message: "Failed to create tab", data: nil)
+                Task { @MainActor in
+                    await BrowserAgentSessionStore.shared.dispose(sessionId: session.id)
+                }
                 return
             }
 
@@ -10120,6 +10129,7 @@ class TerminalController {
             }
 
             let store = BrowserAgentSessionStore.shared
+            let dateFormatter = ISO8601DateFormatter()
             let entries: [[String: Any]] = sessions.map { session in
                 [
                     "session_id": session.id.uuidString,
@@ -10127,7 +10137,7 @@ class TerminalController {
                     "source_profile_id": session.sourceProfileId.uuidString,
                     "profile_name": BrowserProfileStore.shared.displayName(for: session.sourceProfileId),
                     "tab_count": store.tabCount(for: session.id),
-                    "created_at": ISO8601DateFormatter().string(from: session.createdAt),
+                    "created_at": dateFormatter.string(from: session.createdAt),
                 ]
             }
             result = .ok(["sessions": entries])
