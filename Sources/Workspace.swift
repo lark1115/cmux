@@ -419,7 +419,8 @@ extension Workspace {
                 pageZoom: Double(browserPanel.currentPageZoomFactor()),
                 developerToolsVisible: browserPanel.isDeveloperToolsVisible(),
                 backHistoryURLStrings: historySnapshot.backHistoryURLStrings,
-                forwardHistoryURLStrings: historySnapshot.forwardHistoryURLStrings
+                forwardHistoryURLStrings: historySnapshot.forwardHistoryURLStrings,
+                agentSessionId: browserPanel.agentSessionId
             )
             markdownSnapshot = nil
         case .markdown:
@@ -596,6 +597,11 @@ extension Workspace {
             applySessionPanelMetadata(snapshot, toPanelId: terminalPanel.id)
             return terminalPanel.id
         case .browser:
+            // Agent-owned browser panels are not restored — agents must reconnect
+            // and create new sessions with fresh cookie clones.
+            if snapshot.browser?.agentSessionId != nil {
+                return nil
+            }
             let initialURL = snapshot.browser?.urlString.flatMap { URL(string: $0) }
             guard let browserPanel = newBrowserSurface(
                 inPane: paneId,
@@ -7281,7 +7287,9 @@ final class Workspace: Identifiable, ObservableObject {
         focus: Bool? = nil,
         insertAtEnd: Bool = false,
         preferredProfileID: UUID? = nil,
-        bypassInsecureHTTPHostOnce: String? = nil
+        bypassInsecureHTTPHostOnce: String? = nil,
+        agentSessionId: UUID? = nil,
+        agentDataStoreId: UUID? = nil
     ) -> BrowserPanel? {
         let shouldFocusNewTab = focus ?? (bonsplitController.focusedPaneId == paneId)
         let sourcePanelId = effectiveSelectedPanelId(inPane: paneId)
@@ -7298,7 +7306,9 @@ final class Workspace: Identifiable, ObservableObject {
             bypassInsecureHTTPHostOnce: bypassInsecureHTTPHostOnce,
             proxyEndpoint: remoteProxyEndpoint,
             isRemoteWorkspace: isRemoteWorkspace,
-            remoteWebsiteDataStoreIdentifier: isRemoteWorkspace ? id : nil
+            remoteWebsiteDataStoreIdentifier: isRemoteWorkspace ? id : nil,
+            agentSessionId: agentSessionId,
+            agentDataStoreId: agentDataStoreId
         )
         panels[browserPanel.id] = browserPanel
         panelTitles[browserPanel.id] = browserPanel.displayTitle

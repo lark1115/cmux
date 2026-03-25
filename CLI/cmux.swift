@@ -4584,7 +4584,7 @@ struct CMUXCLI {
         var surfaceRaw = surfaceOpt
         var args = argsWithoutSurfaceFlag
 
-        let verbsWithoutSurface: Set<String> = ["open", "open-split", "new", "identify"]
+        let verbsWithoutSurface: Set<String> = ["open", "open-split", "new", "identify", "agent-session"]
         if surfaceRaw == nil, let first = args.first {
             if !first.hasPrefix("-") && !verbsWithoutSurface.contains(first.lowercased()) {
                 surfaceRaw = first
@@ -5837,6 +5837,88 @@ struct CMUXCLI {
             let payload = try client.sendV2(method: "browser.\(subcommand)", params: ["surface_id": sid])
             output(payload, fallback: "OK")
             return
+        }
+
+        // Agent session commands
+        func agentCallerContext() -> [String: Any] {
+            var caller: [String: Any] = [:]
+            if let sid = ProcessInfo.processInfo.environment["CMUX_SURFACE_ID"] {
+                caller["surface_id"] = sid
+            }
+            if let wid = ProcessInfo.processInfo.environment["CMUX_WORKSPACE_ID"] {
+                caller["workspace_id"] = wid
+            }
+            return caller
+        }
+
+        if subcommand == "agent-session" {
+            guard let verb = subArgs.first?.lowercased() else {
+                throw CLIError(message: "browser agent-session requires: open|tab|dispose|list")
+            }
+            let verbArgs = Array(subArgs.dropFirst())
+
+            switch verb {
+            case "open":
+                guard let profileId = optionValue(verbArgs, name: "--profile") else {
+                    throw CLIError(message: "browser agent-session open requires --profile <uuid>")
+                }
+                let url = optionValue(verbArgs, name: "--url")
+                let paneId = optionValue(verbArgs, name: "--pane")
+                var params: [String: Any] = ["profile_id": profileId]
+                if let url { params["url"] = url }
+                if let paneId { params["pane_id"] = paneId }
+                params["caller"] = agentCallerContext()
+                let payload = try client.sendV2(method: "browser.agent_session.open", params: params)
+                output(payload, fallback: "OK")
+                return
+
+            case "tab":
+                guard let sessionId = optionValue(verbArgs, name: "--session") else {
+                    throw CLIError(message: "browser agent-session tab requires --session <uuid>")
+                }
+                let url = optionValue(verbArgs, name: "--url")
+                let paneId = optionValue(verbArgs, name: "--pane")
+                var params: [String: Any] = ["session_id": sessionId]
+                if let url { params["url"] = url }
+                if let paneId { params["pane_id"] = paneId }
+                params["caller"] = agentCallerContext()
+                let payload = try client.sendV2(method: "browser.agent_session.tab", params: params)
+                output(payload, fallback: "OK")
+                return
+
+            case "dispose":
+                guard let sessionId = optionValue(verbArgs, name: "--session") else {
+                    throw CLIError(message: "browser agent-session dispose requires --session <uuid>")
+                }
+                var params: [String: Any] = ["session_id": sessionId]
+                params["caller"] = agentCallerContext()
+                let payload = try client.sendV2(method: "browser.agent_session.dispose", params: params)
+                output(payload, fallback: "OK")
+                return
+
+            case "list":
+                var params: [String: Any] = [:]
+                params["caller"] = agentCallerContext()
+                let payload = try client.sendV2(method: "browser.agent_session.list", params: params)
+                if effectiveJSONOutput {
+                    print(jsonString(formatIDs(payload, mode: effectiveIDFormat)))
+                } else if let sessions = payload["sessions"] as? [[String: Any]] {
+                    if sessions.isEmpty {
+                        print("No active agent sessions")
+                    } else {
+                        for s in sessions {
+                            let sid = s["session_id"] as? String ?? "?"
+                            let profile = s["profile_name"] as? String ?? "?"
+                            let tabs = s["tab_count"] as? Int ?? 0
+                            print("\(sid)  profile=\(profile)  tabs=\(tabs)")
+                        }
+                    }
+                }
+                return
+
+            default:
+                throw CLIError(message: "Unknown agent-session verb: \(verb). Use: open|tab|dispose|list")
+            }
         }
 
         throw CLIError(message: "Unsupported browser subcommand: \(subcommand)")

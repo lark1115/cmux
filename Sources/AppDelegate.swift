@@ -2326,6 +2326,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         NSWindow.allowsAutomaticWindowTabbing = false
         disableNativeTabbingShortcut()
         ensureApplicationIcon()
+
+        // Garbage-collect orphaned agent session data stores left by unclean shutdown.
+        #if canImport(WebKit)
+        Task { @MainActor in
+            await BrowserAgentSessionStore.shared.garbageCollect()
+        }
+        #endif
         if !isRunningUnderXCTest {
             configureUserNotifications()
             installMenuBarVisibilityObserver()
