@@ -297,8 +297,7 @@ struct BrowserPanelView: View {
     @AppStorage(BrowserImportHintSettings.variantKey) private var browserImportHintVariantRaw = BrowserImportHintSettings.defaultVariant.rawValue
     @AppStorage(BrowserImportHintSettings.showOnBlankTabsKey) private var showBrowserImportHintOnBlankTabs = BrowserImportHintSettings.defaultShowOnBlankTabs
     @AppStorage(BrowserImportHintSettings.dismissedKey) private var isBrowserImportHintDismissed = BrowserImportHintSettings.defaultDismissed
-    @AppStorage(KeyboardShortcutSettings.Action.toggleBrowserDeveloperTools.defaultsKey)
-    private var toggleBrowserDeveloperToolsShortcutData = Data()
+    @ObservedObject private var keyboardShortcutSettingsObserver = KeyboardShortcutSettingsObserver.shared
     @State private var suggestionTask: Task<Void, Never>?
     @State private var isLoadingRemoteSuggestions: Bool = false
     @State private var latestRemoteSuggestionQuery: String = ""
@@ -324,7 +323,6 @@ struct BrowserPanelView: View {
         for: .light,
         themeBackgroundColor: GhosttyBackgroundTheme.currentColor()
     )
-    @State private var toggleBrowserDeveloperToolsShortcut = KeyboardShortcutSettings.Action.toggleBrowserDeveloperTools.defaultShortcut
     // Keep this below half of the compact omnibar height so it reads as a squircle,
     // not a capsule.
     private let omnibarPillCornerRadius: CGFloat = 10
@@ -415,7 +413,8 @@ struct BrowserPanelView: View {
 
     private var developerToolsButtonHelp: String {
         let base = String(localized: "browser.toggleDevTools", defaultValue: "Toggle Developer Tools")
-        return "\(base) (\(toggleBrowserDeveloperToolsShortcut.displayString))"
+        let _ = keyboardShortcutSettingsObserver.revision
+        return "\(base) (\(KeyboardShortcutSettings.shortcut(for: .toggleBrowserDeveloperTools).displayString))"
     }
 
     private var browserImportHintSummary: String {
@@ -460,7 +459,7 @@ struct BrowserPanelView: View {
                     searchState: searchState,
                     focusRequestGeneration: panel.searchFocusRequestGeneration,
                     canApplyFocusRequest: { generation in
-                        panel.canApplySearchFocusRequest(generation)
+                        canApplyBrowserFindFieldFocusRequest(generation)
                     },
                     onNext: { panel.findNext() },
                     onPrevious: { panel.findPrevious() },
@@ -537,7 +536,6 @@ struct BrowserPanelView: View {
                 BrowserThemeSettings.modeKey: BrowserThemeSettings.defaultMode.rawValue,
             ])
             refreshBrowserChromeStyle()
-            refreshToggleBrowserDeveloperToolsShortcut()
             let resolvedThemeMode = BrowserThemeSettings.mode(defaults: .standard)
             if browserThemeModeRaw != resolvedThemeMode.rawValue {
                 browserThemeModeRaw = resolvedThemeMode.rawValue
@@ -588,6 +586,7 @@ struct BrowserPanelView: View {
             if isWebViewBlank() {
                 refreshEmptyStateImportBrowsers()
             }
+            panel.resetReactGrabState()
         }
         .onChange(of: browserThemeModeRaw) { _ in
             let normalizedMode = BrowserThemeSettings.mode(for: browserThemeModeRaw)
@@ -599,9 +598,6 @@ struct BrowserPanelView: View {
         .onChange(of: colorScheme) { _ in
             refreshBrowserChromeStyle()
             panel.refreshAppearanceDrivenColors()
-        }
-        .onChange(of: toggleBrowserDeveloperToolsShortcutData) { _ in
-            refreshToggleBrowserDeveloperToolsShortcut()
         }
         .onChange(of: panel.pendingAddressBarFocusRequestId) { _ in
             applyPendingAddressBarFocusRequestIfNeeded()
@@ -732,6 +728,7 @@ struct BrowserPanelView: View {
                 if shouldShowToolbarImportHintChip {
                     browserImportHintToolbarChip
                 }
+                reactGrabButton
                 browserProfileButton
                 browserThemeModeButton
                 developerToolsButton
@@ -821,6 +818,23 @@ struct BrowserPanelView: View {
                 .safeHelp(String(localized: "browser.downloadInProgress", defaultValue: "Download in progress"))
             }
         }
+    }
+
+    private var reactGrabButton: some View {
+        Button(action: {
+            Task { await panel.toggleOrInjectReactGrab() }
+        }) {
+            Image(systemName: "cursorarrow.click.2")
+                .symbolRenderingMode(.monochrome)
+                .cmuxFlatSymbolColorRendering()
+                .font(.system(size: devToolsButtonIconSize, weight: .medium))
+                .foregroundStyle(panel.isReactGrabActive ? Color.accentColor : Color.secondary)
+                .frame(width: addressBarButtonSize, height: addressBarButtonSize, alignment: .center)
+        }
+        .buttonStyle(OmnibarAddressButtonStyle())
+        .frame(width: addressBarButtonSize, height: addressBarButtonSize, alignment: .center)
+        .safeHelp(String(localized: "browser.reactGrab", defaultValue: "Inject React Grab"))
+        .accessibilityIdentifier("BrowserReactGrabButton")
     }
 
     private var developerToolsButton: some View {
@@ -1133,7 +1147,7 @@ struct BrowserPanelView: View {
                             searchState: searchState,
                             focusRequestGeneration: panel.searchFocusRequestGeneration,
                             canApplyFocusRequest: { generation in
-                                panel.canApplySearchFocusRequest(generation)
+                                canApplyBrowserFindFieldFocusRequest(generation)
                             },
                             onNext: { panel.findNext() },
                             onPrevious: { panel.findPrevious() },
@@ -1220,21 +1234,6 @@ struct BrowserPanelView: View {
         )
     }
 
-    private func refreshToggleBrowserDeveloperToolsShortcut() {
-        toggleBrowserDeveloperToolsShortcut = decodeShortcut(
-            from: toggleBrowserDeveloperToolsShortcutData,
-            fallback: KeyboardShortcutSettings.Action.toggleBrowserDeveloperTools.defaultShortcut
-        )
-    }
-
-    private func decodeShortcut(from data: Data, fallback: StoredShortcut) -> StoredShortcut {
-        guard !data.isEmpty,
-              let shortcut = try? JSONDecoder().decode(StoredShortcut.self, from: data) else {
-            return fallback
-        }
-        return shortcut
-    }
-
     private func syncWebViewResponderPolicyWithViewState(
         reason: String,
         isPanelFocusedOverride: Bool? = nil
@@ -1297,6 +1296,10 @@ struct BrowserPanelView: View {
             return false
         }
         return workspace.focusedPanelId == panel.id
+    }
+
+    private func canApplyBrowserFindFieldFocusRequest(_ generation: UInt64) -> Bool {
+        isPanelFocusedInModel() && panel.canApplySearchFocusRequest(generation)
     }
 
     private func shouldApplyAddressBarExitFallback(in window: NSWindow) -> Bool {
@@ -4313,6 +4316,7 @@ struct WebViewRepresentable: NSViewRepresentable {
         var onGeometryChanged: (() -> Void)?
         private(set) var geometryRevision: UInt64 = 0
         private var lastReportedGeometryState: GeometryState?
+        private var hasPendingGeometryNotification = false
         private weak var hostedWebView: WKWebView?
         private var hostedWebViewConstraints: [NSLayoutConstraint] = []
         private weak var localInlineSlotView: WindowBrowserSlotView?
@@ -4647,7 +4651,30 @@ struct WebViewRepresentable: NSViewRepresentable {
             )
         }
 
+        /// Record that geometry changed without firing the callback immediately.
+        /// `setFrameOrigin`/`setFrameSize` can fire multiple times before `layout()`;
+        /// deferring avoids redundant portal-sync cascades during divider drag.
+        /// A dispatch fallback ensures the callback fires even if `layout()` is not called.
+        /// Note: `lastReportedGeometryState` and `geometryRevision` are only updated
+        /// when the callback actually fires, so `updateNSView` sees a revision that
+        /// is strictly tied to emitted callbacks (no premature increments).
+        private func markGeometryDirtyIfNeeded() {
+            let state = currentGeometryState()
+            guard state != lastReportedGeometryState else { return }
+            guard !hasPendingGeometryNotification else { return }
+            hasPendingGeometryNotification = true
+            DispatchQueue.main.async { [weak self] in
+                self?.notifyGeometryChangedIfNeeded()
+            }
+        }
+
+        /// Check for geometry changes and fire the callback. Also flushes any pending
+        /// dirty state from `markGeometryDirtyIfNeeded` so `layout()` supersedes the
+        /// async fallback.  Only updates `lastReportedGeometryState` / `geometryRevision`
+        /// when the callback is emitted, keeping the revision in sync with actual
+        /// notifications.
         private func notifyGeometryChangedIfNeeded() {
+            hasPendingGeometryNotification = false
             let state = currentGeometryState()
             guard state != lastReportedGeometryState else { return }
             lastReportedGeometryState = state
@@ -5070,7 +5097,8 @@ struct WebViewRepresentable: NSViewRepresentable {
         override func setFrameOrigin(_ newOrigin: NSPoint) {
             super.setFrameOrigin(newOrigin)
             window?.invalidateCursorRects(for: self)
-            notifyGeometryChangedIfNeeded()
+            // Mark dirty; the callback fires from layout() with the settled geometry.
+            markGeometryDirtyIfNeeded()
 #if DEBUG
             debugLogHostedInspectorLayoutIfNeeded(reason: "setFrameOrigin")
 #endif
@@ -5079,7 +5107,8 @@ struct WebViewRepresentable: NSViewRepresentable {
         override func setFrameSize(_ newSize: NSSize) {
             super.setFrameSize(newSize)
             window?.invalidateCursorRects(for: self)
-            notifyGeometryChangedIfNeeded()
+            // Mark dirty; the callback fires from layout() with the settled geometry.
+            markGeometryDirtyIfNeeded()
 #if DEBUG
             debugLogHostedInspectorLayoutIfNeeded(reason: "setFrameSize")
 #endif

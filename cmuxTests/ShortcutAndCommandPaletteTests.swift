@@ -213,7 +213,7 @@ final class CommandPaletteKeyboardNavigationTests: XCTestCase {
         )
     }
 
-    func testControlLetterNavigationSupportsPrintableAndControlChars() {
+    func testControlLetterNavigationSupportsPrintableAndControlCharsForNPOnly() {
         XCTAssertEqual(
             commandPaletteSelectionDeltaForKeyboardNavigation(
                 flags: [.control],
@@ -246,37 +246,36 @@ final class CommandPaletteKeyboardNavigationTests: XCTestCase {
             ),
             -1
         )
-        XCTAssertEqual(
+    }
+
+    func testDoesNotTreatControlJKAsPaletteNavigation() {
+        XCTAssertNil(
             commandPaletteSelectionDeltaForKeyboardNavigation(
                 flags: [.control],
                 chars: "j",
                 keyCode: 38
-            ),
-            1
+            )
         )
-        XCTAssertEqual(
+        XCTAssertNil(
             commandPaletteSelectionDeltaForKeyboardNavigation(
                 flags: [.control],
                 chars: "\u{0a}",
                 keyCode: 38
-            ),
-            1
+            )
         )
-        XCTAssertEqual(
+        XCTAssertNil(
             commandPaletteSelectionDeltaForKeyboardNavigation(
                 flags: [.control],
                 chars: "k",
                 keyCode: 40
-            ),
-            -1
+            )
         )
-        XCTAssertEqual(
+        XCTAssertNil(
             commandPaletteSelectionDeltaForKeyboardNavigation(
                 flags: [.control],
                 chars: "\u{0b}",
                 keyCode: 40
-            ),
-            -1
+            )
         )
     }
 
@@ -300,6 +299,37 @@ final class CommandPaletteKeyboardNavigationTests: XCTestCase {
                 flags: [.control],
                 chars: "x",
                 keyCode: 7
+            )
+        )
+    }
+
+    func testInlineTextHandlingDisablesPaletteSelectionNavigationRouting() {
+        XCTAssertTrue(
+            shouldRouteCommandPaletteSelectionNavigation(
+                delta: -1,
+                isInteractive: true,
+                usesInlineTextHandling: false
+            )
+        )
+        XCTAssertFalse(
+            shouldRouteCommandPaletteSelectionNavigation(
+                delta: -1,
+                isInteractive: true,
+                usesInlineTextHandling: true
+            )
+        )
+        XCTAssertFalse(
+            shouldRouteCommandPaletteSelectionNavigation(
+                delta: nil,
+                isInteractive: true,
+                usesInlineTextHandling: false
+            )
+        )
+        XCTAssertFalse(
+            shouldRouteCommandPaletteSelectionNavigation(
+                delta: 1,
+                isInteractive: false,
+                usesInlineTextHandling: false
             )
         )
     }
@@ -399,6 +429,67 @@ final class CommandPaletteOpenShortcutConsumptionTests: XCTestCase {
                 chars: "",
                 keyCode: 53
             )
+        )
+    }
+}
+
+
+final class CommandPaletteFocusStealerClassificationTests: XCTestCase {
+    private final class NonViewTextDelegate: NSObject, NSTextViewDelegate {}
+    private final class UnrelatedViewTextDelegate: NSView, NSTextViewDelegate {}
+
+    func testTreatsGhosttySurfaceViewAsFocusStealer() {
+        let surfaceView = GhosttyNSView(frame: NSRect(x: 0, y: 0, width: 120, height: 80))
+
+        XCTAssertTrue(isCommandPaletteFocusStealingTerminalOrBrowserResponder(surfaceView))
+    }
+
+    func testTreatsTextFieldInsideTerminalHostedViewAsFocusStealer() {
+        let hostedView = GhosttySurfaceScrollView(
+            surfaceView: GhosttyNSView(frame: NSRect(x: 0, y: 0, width: 120, height: 80))
+        )
+        let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
+        hostedView.addSubview(textField)
+
+        XCTAssertTrue(
+            isCommandPaletteFocusStealingTerminalOrBrowserResponder(textField),
+            "Terminal-owned overlay text inputs should not be allowed to reclaim focus from the command palette"
+        )
+    }
+
+    func testDoesNotTreatUnrelatedTextFieldAsFocusStealer() {
+        let textField = NSTextField(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
+
+        XCTAssertFalse(isCommandPaletteFocusStealingTerminalOrBrowserResponder(textField))
+    }
+
+    func testTreatsTextViewInsideTerminalHostedViewAsFocusStealerWhenDelegateIsNotAView() {
+        let hostedView = GhosttySurfaceScrollView(
+            surfaceView: GhosttyNSView(frame: NSRect(x: 0, y: 0, width: 120, height: 80))
+        )
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
+        let delegate = NonViewTextDelegate()
+        textView.delegate = delegate
+        hostedView.addSubview(textView)
+
+        XCTAssertTrue(
+            isCommandPaletteFocusStealingTerminalOrBrowserResponder(textView),
+            "NSTextView responders should still be blocked via the NSView hierarchy walk when the delegate is not a view"
+        )
+    }
+
+    func testTreatsTextViewInsideTerminalHostedViewAsFocusStealerWhenDelegateViewIsUnrelated() {
+        let hostedView = GhosttySurfaceScrollView(
+            surfaceView: GhosttyNSView(frame: NSRect(x: 0, y: 0, width: 120, height: 80))
+        )
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 120, height: 24))
+        let delegateView = UnrelatedViewTextDelegate(frame: .zero)
+        textView.delegate = delegateView
+        hostedView.addSubview(textView)
+
+        XCTAssertTrue(
+            isCommandPaletteFocusStealingTerminalOrBrowserResponder(textView),
+            "NSTextView responders should still be blocked via the NSView hierarchy walk when the delegate view is unrelated"
         )
     }
 }
@@ -530,6 +621,26 @@ final class ShortcutHintModifierPolicyTests: XCTestCase {
     func testCommandHintDefaultsToEnabledWhenSettingMissing() {
         withDefaultsSuite { defaults in
             defaults.removeObject(forKey: ShortcutHintDebugSettings.showHintsOnCommandHoldKey)
+
+            XCTAssertTrue(ShortcutHintModifierPolicy.shouldShowHints(for: [.command], defaults: defaults))
+            XCTAssertFalse(ShortcutHintModifierPolicy.shouldShowHints(for: [.control], defaults: defaults))
+        }
+    }
+
+    func testShortcutHintStaysCommandOnlyWhenWorkspaceShortcutIsCustomized() {
+        let action = KeyboardShortcutSettings.Action.selectWorkspaceByNumber
+        let originalShortcut = KeyboardShortcutSettings.shortcut(for: action)
+        defer {
+            KeyboardShortcutSettings.setShortcut(originalShortcut, for: action)
+        }
+
+        KeyboardShortcutSettings.setShortcut(
+            StoredShortcut(key: "1", command: false, shift: false, option: false, control: true),
+            for: action
+        )
+
+        withDefaultsSuite { defaults in
+            defaults.set(true, forKey: ShortcutHintDebugSettings.showHintsOnCommandHoldKey)
 
             XCTAssertTrue(ShortcutHintModifierPolicy.shouldShowHints(for: [.command], defaults: defaults))
             XCTAssertFalse(ShortcutHintModifierPolicy.shouldShowHints(for: [.control], defaults: defaults))
